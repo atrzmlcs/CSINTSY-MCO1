@@ -1,190 +1,290 @@
 package solver;
 
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.Queue;
-import java.util.Set;
+import java.util.*;
 
 public class SokoBot {
 
-    // Topography lookups (Walls and Targets never move during simulation)
-    private Set<Point> walls = new HashSet<>();
-    private Set<Point> goals = new HashSet<>();
+    private final Set<Point> walls = new HashSet<>();
+    private final Set<Point> goals = new HashSet<>();
+    private final Set<Point> safeTiles = new HashSet<>();
+    private final Map<Point, Map<Point, Integer>> goalDistances = new HashMap<>();
+    private final int[][] directions = {{0, -1, 'u'}, {0, 1, 'd'}, {-1, 0, 'l'}, {1, 0, 'r'}};
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
-        // Reset lookups between level changes
         walls.clear();
         goals.clear();
+        safeTiles.clear();
+        goalDistances.clear();
 
         Point initialPlayer = null;
         Set<Point> initialBoxes = new HashSet<>();
 
-        // Parse the professor's dual-grid system
+        // Parse environment safely
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                if (mapData[r][c] == '#') {
-                    walls.add(new Point(c, r));
-                } else if (mapData[r][c] == '.') {
-                    goals.add(new Point(c, r));
-                }
+                char tile = (r < mapData.length && c < mapData[r].length) ? mapData[r][c] : ' ';
+                char item = (r < itemsData.length && c < itemsData[r].length) ? itemsData[r][c] : ' ';
 
-                if (itemsData[r][c] == '@') {
-                    initialPlayer = new Point(c, r);
-                } else if (itemsData[r][c] == '$') {
-                    initialBoxes.add(new Point(c, r));
-                } else if (itemsData[r][c] == '*') {
+                if (tile == '#') walls.add(new Point(c, r));
+                else if (tile == '.') goals.add(new Point(c, r));
+
+                if (item == '@') initialPlayer = new Point(c, r);
+                else if (item == '$') initialBoxes.add(new Point(c, r));
+                else if (item == '*') {
                     initialBoxes.add(new Point(c, r));
                     goals.add(new Point(c, r));
                 }
             }
         }
 
-        BoardState startState = new BoardState(initialPlayer, initialBoxes, "");
-        return runOptimizedBFS(startState);
+        if (initialPlayer == null || goals.isEmpty()) return "";
+
+        computeSafeTiles(width, height);
+        computeGoalDistances(width, height);
+
+        BoardState startState = new BoardState(initialPlayer, initialBoxes, "", 0, 0);
+        return runMacroAStar(startState, width, height);
+    }
+
+    private void computeSafeTiles(int width, int height) {
+        Queue<Point> queue = new LinkedList<>();
+        for (Point goal : goals) {
+            safeTiles.add(goal);
+            queue.add(goal);
+        }
+
+        while (!queue.isEmpty()) {
+            Point curr = queue.poll();
+            for (int[] d : directions) {
+                Point pushFrom = new Point(curr.x + d[0], curr.y + d[1]);
+                Point playerPos = new Point(pushFrom.x + d[0], pushFrom.y + d[1]);
+
+                if (isValidFloor(pushFrom, width, height) && isValidFloor(playerPos, width, height)) {
+                    if (!safeTiles.contains(pushFrom)) {
+                        safeTiles.add(pushFrom);
+                        queue.add(pushFrom);
+                    }
+                }
+            }
+        }
+    }
+
+    private void computeGoalDistances(int width, int height) {
+        for (Point goal : goals) {
+            Map<Point, Integer> distances = new HashMap<>();
+            Queue<Point> queue = new LinkedList<>();
+
+            distances.put(goal, 0);
+            queue.add(goal);
+
+            while (!queue.isEmpty()) {
+                Point curr = queue.poll();
+                int dist = distances.get(curr);
+
+                for (int[] d : directions) {
+                    Point next = new Point(curr.x + d[0], curr.y + d[1]);
+                    if (isValidFloor(next, width, height)) {
+                        if (!distances.containsKey(next)) {
+                            distances.put(next, dist + 1);
+                            queue.add(next);
+                        }
+                    }
+                }
+            }
+            goalDistances.put(goal, distances);
+        }
+    }
+
+    private int getHeuristic(Set<Point> boxes, int width) {
+        int totalDistance = 0;
+        List<Point> availableGoals = new ArrayList<>(goals);
+        
+        // Sorting guarantees the greedy matching is 100% deterministic and stable
+        List<Point> sortedBoxes = new ArrayList<>(boxes);
+        sortedBoxes.sort(Comparator.comparingInt(p -> p.y * width + p.x));
+        
+        for (Point box : sortedBoxes) {
+            int minDistance = 100000;
+            Point bestGoal = null;
+            
+            for (Point goal : availableGoals) {
+                Map<Point, Integer> dists = goalDistances.get(goal);
+                if (dists != null && dists.containsKey(box)) {
+                    int dist = dists.get(box);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        bestGoal = goal;
+                    }
+                }
+            }
+            
+            if (bestGoal != null) {
+                availableGoals.remove(bestGoal); 
+                totalDistance += minDistance;
+            } else {
+                return 100000; // Impossible Dead-End
+            }
+        }
+        return totalDistance * 10; // Highly aggressive weighting to prioritize pushing
     }
 
     /**
-     * Reverts to the stable FIFO Queue structure that crushed the initial maps,
-     * but protects it from infinite state explosions using a corner filter.
+     * Determines the top-leftmost reachable floor tile from the player's current spot.
+     * This forces the algorithm to treat walking around an empty room as a single, identical state.
      */
-    private String runOptimizedBFS(BoardState startState) {
-        Set<BoardState> visited = new HashSet<>();
-        Queue<BoardState> queue = new LinkedList<>();
+    private Point getCanonical(Point player, Set<Point> boxes, int width, int height) {
+        Queue<Point> q = new LinkedList<>();
+        Set<Point> vis = new HashSet<>();
+        q.add(player);
+        vis.add(player);
+        Point canonical = player;
+
+        while (!q.isEmpty()) {
+            Point p = q.poll();
+            if (p.y < canonical.y || (p.y == canonical.y && p.x < canonical.x)) {
+                canonical = p;
+            }
+            for (int[] dir : directions) {
+                Point next = new Point(p.x + dir[0], p.y + dir[1]);
+                if (isValidFloor(next, width, height) && !boxes.contains(next) && !vis.contains(next)) {
+                    vis.add(next);
+                    q.add(next);
+                }
+            }
+        }
+        return canonical;
+    }
+
+    private String runMacroAStar(BoardState startState, int width, int height) {
+        PriorityQueue<BoardState> pq = new PriorityQueue<>();
+        Set<StateKey> visited = new HashSet<>();
+
+        Point startCanonical = getCanonical(startState.player, startState.boxes, width, height);
+        startState.fCost = getHeuristic(startState.boxes, width);
         
-        queue.add(startState);
-        visited.add(startState);
+        visited.add(new StateKey(startState.boxes, startCanonical));
+        pq.add(startState);
 
-        // Standard Sokoban directional rules
-        int[][] directions = {
-            {0, -1, 'u'}, // Up
-            {0, 1, 'd'},  // Down
-            {-1, 0, 'l'}, // Left
-            {1, 0, 'r'}   // Right
-        };
+        while (!pq.isEmpty()) {
+            BoardState curr = pq.poll();
 
-        while (!queue.isEmpty()) {
-            BoardState current = queue.poll();
-
-            // SUCCESS CONDITION: All boxes match target goal nodes
-            if (goals.containsAll(current.boxes)) {
-                return current.moveHistory;
+            if (goals.containsAll(curr.boxes)) {
+                return curr.moveHistory;
             }
 
-            for (int[] dir : directions) {
-                int dx = dir[0];
-                int dy = dir[1];
-                char moveChar = (char) dir[2];
+            // 1. MACRO SCAN: Find all floor tiles the player can currently walk to
+            Queue<Point> q = new LinkedList<>();
+            Map<Point, String> paths = new HashMap<>();
 
-                Point nextPlayer = new Point(current.player.x + dx, current.player.y + dy);
+            q.add(curr.player);
+            paths.put(curr.player, "");
 
-                // Stop if the player walks directly into a wall
-                if (walls.contains(nextPlayer)) {
-                    continue; 
+            while (!q.isEmpty()) {
+                Point p = q.poll();
+                String pathSoFar = paths.get(p);
+
+                for (int[] dir : directions) {
+                    Point next = new Point(p.x + dir[0], p.y + dir[1]);
+                    if (isValidFloor(next, width, height) && !curr.boxes.contains(next) && !paths.containsKey(next)) {
+                        paths.put(next, pathSoFar + (char)dir[2]);
+                        q.add(next);
+                    }
                 }
+            }
 
-                // Interaction: Player attempts to push a crate
-                if (current.boxes.contains(nextPlayer)) {
-                    Point behindBox = new Point(nextPlayer.x + dx, nextPlayer.y + dy);
+            // 2. MACRO PUSH: Only generate new realities if a box is being pushed!
+            for (Map.Entry<Point, String> entry : paths.entrySet()) {
+                Point p = entry.getKey();
+                String pathToP = entry.getValue();
 
-                    // Blocked if the tile behind the box is a wall or another box
-                    if (walls.contains(behindBox) || current.boxes.contains(behindBox)) {
-                        continue; 
-                    }
-
-                    // DEADLOCK SHIELD: If pushing this box into a corner ruins the game,
-                    // discard this entire board configuration immediately!
-                    if (isDeadlocked(behindBox)) {
-                        continue;
-                    }
-
-                    // Valid Push Configuration
-                    Set<Point> newBoxes = new HashSet<>(current.boxes);
-                    newBoxes.remove(nextPlayer);
-                    newBoxes.add(behindBox);
-
-                    BoardState nextState = new BoardState(nextPlayer, newBoxes, current.moveHistory + moveChar);
+                for (int[] dir : directions) {
+                    Point boxPos = new Point(p.x + dir[0], p.y + dir[1]);
                     
-                    if (!visited.contains(nextState)) {
-                        visited.add(nextState);
-                        queue.add(nextState);
-                    }
-                } 
-                // Standard Step: Player walks onto empty floor
-                else {
-                    BoardState nextState = new BoardState(nextPlayer, current.boxes, current.moveHistory + moveChar);
+                    if (curr.boxes.contains(boxPos)) {
+                        Point pushPos = new Point(boxPos.x + dir[0], boxPos.y + dir[1]);
 
-                    if (!visited.contains(nextState)) {
-                        visited.add(nextState);
-                        queue.add(nextState);
+                        if (isValidFloor(pushPos, width, height) && !curr.boxes.contains(pushPos)) {
+                            if (safeTiles.contains(pushPos)) { 
+                                
+                                Set<Point> newBoxes = new HashSet<>(curr.boxes);
+                                newBoxes.remove(boxPos);
+                                newBoxes.add(pushPos);
+
+                                Point newPlayer = boxPos;
+                                Point newCanonical = getCanonical(newPlayer, newBoxes, width, height);
+                                StateKey newKey = new StateKey(newBoxes, newCanonical);
+
+                                if (!visited.contains(newKey)) {
+                                    visited.add(newKey);
+                                    
+                                    int newG = curr.gCost + 1; // 1 Box Push = 1 Cost
+                                    int h = getHeuristic(newBoxes, width);
+                                    
+                                    if (h < 100000) { 
+                                        String newHistory = curr.moveHistory + pathToP + (char)dir[2];
+                                        BoardState nextState = new BoardState(newPlayer, newBoxes, newHistory, newG, newG + h);
+                                        pq.add(nextState);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        
-        // Return empty sequence if map layout is mathematically impossible
         return ""; 
     }
 
-    /**
-     * Mathematically checks if a box has been pushed into an inescapable corner.
-     * Corners are permanent deadlocks unless that corner happens to be a target goal.
-     */
-    private boolean isDeadlocked(Point box) {
-        if (goals.contains(box)) {
-            return false; // Safe: Pushed directly onto a valid goal spot
-        }
-
-        boolean wallUp = walls.contains(new Point(box.x, box.y - 1));
-        boolean wallDown = walls.contains(new Point(box.x, box.y + 1));
-        boolean wallLeft = walls.contains(new Point(box.x - 1, box.y));
-        boolean wallRight = walls.contains(new Point(box.x + 1, box.y));
-
-        // Corner configurations: If two adjacent orthogonal sides are walls, it's trapped.
-        if (wallUp && wallLeft) return true;
-        if (wallUp && wallRight) return true;
-        if (wallDown && wallLeft) return true;
-        if (wallDown && wallRight) return true;
-
-        return false;
+    private boolean isValidFloor(Point p, int width, int height) {
+        return p.x >= 0 && p.x < width && p.y >= 0 && p.y < height && !walls.contains(p);
     }
 }
 
 // ==========================================
-// INFRASTRUCTURE STRUCTURES
+// DATA STRUCTURES
 // ==========================================
 class Point {
     int x, y;
     Point(int x, int y) { this.x = x; this.y = y; }
-    
-    @Override
-    public boolean equals(Object o) {
+    @Override public boolean equals(Object o) {
         if (!(o instanceof Point)) return false;
-        Point p = (Point) o;
-        return this.x == p.x && this.y == p.y;
+        Point p = (Point) o; return this.x == p.x && this.y == p.y;
     }
-    
-    @Override
-    public int hashCode() { return (x * 31) + y; }
+    @Override public int hashCode() { return (x * 31) + y; }
 }
 
-class BoardState {
+class StateKey {
+    Set<Point> boxes;
+    Point canonicalPlayer;
+
+    StateKey(Set<Point> boxes, Point canonicalPlayer) {
+        this.boxes = boxes;
+        this.canonicalPlayer = canonicalPlayer;
+    }
+
+    @Override public boolean equals(Object o) {
+        if (!(o instanceof StateKey)) return false;
+        StateKey k = (StateKey) o;
+        return this.canonicalPlayer.equals(k.canonicalPlayer) && this.boxes.equals(k.boxes);
+    }
+
+    @Override public int hashCode() { return canonicalPlayer.hashCode() * 31 + boxes.hashCode(); }
+}
+
+class BoardState implements Comparable<BoardState> {
     Point player;
     Set<Point> boxes;
     String moveHistory;
+    int gCost; 
+    int fCost; 
 
-    BoardState(Point player, Set<Point> boxes, String moveHistory) {
+    BoardState(Point player, Set<Point> boxes, String moveHistory, int gCost, int fCost) {
         this.player = player;
         this.boxes = new HashSet<>(boxes);
         this.moveHistory = moveHistory;
+        this.gCost = gCost;
+        this.fCost = fCost;
     }
 
-    @Override
-    public boolean equals(Object o) {
-        if (!(o instanceof BoardState)) return false;
-        BoardState s = (BoardState) o;
-        return this.player.equals(s.player) && this.boxes.equals(s.boxes);
-    }
-
-    @Override
-    public int hashCode() { return player.hashCode() + boxes.hashCode(); }
+    @Override public int compareTo(BoardState other) { return Integer.compare(this.fCost, other.fCost); }
 }
