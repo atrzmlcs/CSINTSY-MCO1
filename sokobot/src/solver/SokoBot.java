@@ -17,11 +17,15 @@ public class SokoBot {
     private int invalidHeuristic;
     private int maxQueueSize;
 
+    private int blockedBy2x2Deadlock;
+
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         walls.clear();
         goals.clear();
         safeTiles.clear();
         goalDistances.clear();
+
+        blockedBy2x2Deadlock = 0;
 
         expandedStates = 0;
         generatedPushes = 0;
@@ -178,6 +182,7 @@ public class SokoBot {
         System.out.println("Skipped visited states: " + skippedVisited);
         System.out.println("Invalid heuristic states: " + invalidHeuristic);
         System.out.println("Max priority queue size: " + maxQueueSize);
+        System.out.println("Blocked by 2x2 deadlock: " + blockedBy2x2Deadlock);
         System.out.println("===================================");
     }
 
@@ -200,7 +205,11 @@ public class SokoBot {
             if (expandedStates % 10000 == 0) {
                 System.out.println("[SokoBot] Expanded: " + expandedStates
                         + " | Generated pushes: " + generatedPushes
-                        + " | Queue: " + pq.size());
+                        + " | Queue: " + pq.size()
+                        + " | Safe blocked: " + blockedBySafeTiles
+                        + " | 2x2 blocked: " + blockedBy2x2Deadlock
+                        + " | Visited skipped: " + skippedVisited
+                        + " | Invalid h: " + invalidHeuristic);
             }
 
             if (goals.containsAll(curr.boxes)) {
@@ -243,10 +252,15 @@ public class SokoBot {
                             generatedPushes++;
 
                             if (safeTiles.contains(pushPos)) {
-                                
+
                                 Set<Point> newBoxes = new HashSet<>(curr.boxes);
                                 newBoxes.remove(boxPos);
                                 newBoxes.add(pushPos);
+
+                                if (has2x2DeadlockAround(pushPos, newBoxes)) {
+                                    blockedBy2x2Deadlock++;
+                                    continue;
+                                }
 
                                 Point newPlayer = boxPos;
                                 Point newCanonical = getCanonical(newPlayer, newBoxes, width, height);
@@ -278,6 +292,47 @@ public class SokoBot {
         }
         printDebugStats("No solution found before search space ended");
         return "";
+    }
+
+    private boolean has2x2DeadlockAround(Point movedBox, Set<Point> boxes) {
+        int[][] topLeftOffsets = {
+                {0, 0},
+                {-1, 0},
+                {0, -1},
+                {-1, -1}
+        };
+
+        for (int[] offset : topLeftOffsets) {
+            Point topLeft = new Point(movedBox.x + offset[0], movedBox.y + offset[1]);
+
+            Point p1 = topLeft;
+            Point p2 = new Point(topLeft.x + 1, topLeft.y);
+            Point p3 = new Point(topLeft.x, topLeft.y + 1);
+            Point p4 = new Point(topLeft.x + 1, topLeft.y + 1);
+
+            if (isBlockedFor2x2(p1, boxes) &&
+                    isBlockedFor2x2(p2, boxes) &&
+                    isBlockedFor2x2(p3, boxes) &&
+                    isBlockedFor2x2(p4, boxes)) {
+
+                if (isNonGoalBox(p1, boxes) ||
+                        isNonGoalBox(p2, boxes) ||
+                        isNonGoalBox(p3, boxes) ||
+                        isNonGoalBox(p4, boxes)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isBlockedFor2x2(Point p, Set<Point> boxes) {
+        return walls.contains(p) || boxes.contains(p);
+    }
+
+    private boolean isNonGoalBox(Point p, Set<Point> boxes) {
+        return boxes.contains(p) && !goals.contains(p);
     }
 
     private boolean isValidFloor(Point p, int width, int height) {
@@ -331,5 +386,15 @@ class BoardState implements Comparable<BoardState> {
         this.fCost = fCost;
     }
 
-    @Override public int compareTo(BoardState other) { return Integer.compare(this.fCost, other.fCost); }
+    @Override
+    public int compareTo(BoardState other) {
+        int fCompare = Integer.compare(this.fCost, other.fCost);
+        if (fCompare != 0) {
+            return fCompare;
+        }
+
+        // If fCost is tied, prefer the state with more pushes already made.
+        // Since f = g + h, higher g usually means lower remaining heuristic.
+        return Integer.compare(other.gCost, this.gCost);
+    }
 }
