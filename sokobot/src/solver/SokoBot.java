@@ -10,11 +10,25 @@ public class SokoBot {
     private final Map<Point, Map<Point, Integer>> goalDistances = new HashMap<>();
     private final int[][] directions = {{0, -1, 'u'}, {0, 1, 'd'}, {-1, 0, 'l'}, {1, 0, 'r'}};
 
+    private int expandedStates;
+    private int generatedPushes;
+    private int blockedBySafeTiles;
+    private int skippedVisited;
+    private int invalidHeuristic;
+    private int maxQueueSize;
+
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         walls.clear();
         goals.clear();
         safeTiles.clear();
         goalDistances.clear();
+
+        expandedStates = 0;
+        generatedPushes = 0;
+        blockedBySafeTiles = 0;
+        skippedVisited = 0;
+        invalidHeuristic = 0;
+        maxQueueSize = 0;
 
         Point initialPlayer = null;
         Set<Point> initialBoxes = new HashSet<>();
@@ -155,6 +169,18 @@ public class SokoBot {
         return canonical;
     }
 
+    private void printDebugStats(String status) {
+        System.out.println("========== SokoBot Debug ==========");
+        System.out.println("Status: " + status);
+        System.out.println("Expanded states: " + expandedStates);
+        System.out.println("Generated pushes: " + generatedPushes);
+        System.out.println("Blocked by safe tiles: " + blockedBySafeTiles);
+        System.out.println("Skipped visited states: " + skippedVisited);
+        System.out.println("Invalid heuristic states: " + invalidHeuristic);
+        System.out.println("Max priority queue size: " + maxQueueSize);
+        System.out.println("===================================");
+    }
+
     private String runMacroAStar(BoardState startState, int width, int height) {
         PriorityQueue<BoardState> pq = new PriorityQueue<>();
         Set<StateKey> visited = new HashSet<>();
@@ -166,9 +192,19 @@ public class SokoBot {
         pq.add(startState);
 
         while (!pq.isEmpty()) {
+            maxQueueSize = Math.max(maxQueueSize, pq.size());
+
             BoardState curr = pq.poll();
+            expandedStates++;
+
+            if (expandedStates % 10000 == 0) {
+                System.out.println("[SokoBot] Expanded: " + expandedStates
+                        + " | Generated pushes: " + generatedPushes
+                        + " | Queue: " + pq.size());
+            }
 
             if (goals.containsAll(curr.boxes)) {
+                printDebugStats("Solved");
                 return curr.moveHistory;
             }
 
@@ -204,7 +240,9 @@ public class SokoBot {
                         Point pushPos = new Point(boxPos.x + dir[0], boxPos.y + dir[1]);
 
                         if (isValidFloor(pushPos, width, height) && !curr.boxes.contains(pushPos)) {
-                            if (safeTiles.contains(pushPos)) { 
+                            generatedPushes++;
+
+                            if (safeTiles.contains(pushPos)) {
                                 
                                 Set<Point> newBoxes = new HashSet<>(curr.boxes);
                                 newBoxes.remove(boxPos);
@@ -224,15 +262,22 @@ public class SokoBot {
                                         String newHistory = curr.moveHistory + pathToP + (char)dir[2];
                                         BoardState nextState = new BoardState(newPlayer, newBoxes, newHistory, newG, newG + h);
                                         pq.add(nextState);
+                                    } else {
+                                        invalidHeuristic++;
                                     }
+                                } else {
+                                    skippedVisited++;
                                 }
+                            } else {
+                                blockedBySafeTiles++;
                             }
                         }
                     }
                 }
             }
         }
-        return ""; 
+        printDebugStats("No solution found before search space ended");
+        return "";
     }
 
     private boolean isValidFloor(Point p, int width, int height) {
