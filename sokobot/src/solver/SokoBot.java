@@ -1,8 +1,20 @@
+/**
+ * CSINTSY MCO1: SokoBot
+ * Group Members:
+ * - Aguete, Sofia Ashley
+ * - Gaspar, Chrisane Ianna
+ * - Maglente, Michael Stephen
+ * - Malicsi, Atreuz Patrick
+ */
+
 package solver;
 
 import java.util.*;
 
 public class SokoBot {
+
+    private static final int INF = 100000;
+    private static final int HEURISTIC_WEIGHT = 10;
 
     private final Set<Point> walls = new HashSet<>();
     private final Set<Point> goals = new HashSet<>();
@@ -10,34 +22,21 @@ public class SokoBot {
     private final Map<Point, Map<Point, Integer>> goalDistances = new HashMap<>();
     private final int[][] directions = {{0, -1, 'u'}, {0, 1, 'd'}, {-1, 0, 'l'}, {1, 0, 'r'}};
 
-    private int expandedStates;
-    private int generatedPushes;
-    private int blockedBySafeTiles;
-    private int skippedVisited;
-    private int invalidHeuristic;
-    private int maxQueueSize;
-
-    private int blockedBy2x2Deadlock;
-
+    /**
+     * Main method called by the Sokoban program.
+     * It reads the map, gets the starting player and crate positions,
+     * prepares the helper data, then runs the A* solver.
+     */
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         walls.clear();
         goals.clear();
         safeTiles.clear();
         goalDistances.clear();
 
-        blockedBy2x2Deadlock = 0;
-
-        expandedStates = 0;
-        generatedPushes = 0;
-        blockedBySafeTiles = 0;
-        skippedVisited = 0;
-        invalidHeuristic = 0;
-        maxQueueSize = 0;
-
         Point initialPlayer = null;
         Set<Point> initialBoxes = new HashSet<>();
 
-        // Parse environment safely
+        // Read the map and separate the fixed parts from the movable parts.
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 char tile = (r < mapData.length && c < mapData[r].length) ? mapData[r][c] : ' ';
@@ -64,6 +63,117 @@ public class SokoBot {
         return runMacroAStar(startState, width, height);
     }
 
+    /**
+     * Runs the main macro A* search.
+     * The solver first checks all places the player can walk to, then it only
+     * creates a new state when a crate is pushed. This keeps the search smaller
+     * than treating every walking step as its own state.
+     */
+    private String runMacroAStar(BoardState startState, int width, int height) {
+        PriorityQueue<BoardState> pq = new PriorityQueue<>();
+        Set<StateKey> visited = new HashSet<>();
+
+        Point startCanonical = getCanonical(startState.player, startState.boxes, width, height);
+        startState.fCost = getHeuristic(startState.boxes, width);
+
+        visited.add(new StateKey(startState.boxes, startCanonical));
+        pq.add(startState);
+
+        while (!pq.isEmpty()) {
+            BoardState curr = pq.poll();
+
+            if (goals.containsAll(curr.boxes)) {
+                return curr.moveHistory;
+            }
+
+            // Find all player positions reachable without pushing a crate.f
+            Queue<Point> queue = new LinkedList<>();
+            Map<Point, String> paths = new HashMap<>();
+
+            queue.add(curr.player);
+            paths.put(curr.player, "");
+
+            while (!queue.isEmpty()) {
+                Point p = queue.poll();
+                String pathSoFar = paths.get(p);
+
+                for (int[] dir : directions) {
+                    Point next = new Point(p.x + dir[0], p.y + dir[1]);
+
+                    if (isValidFloor(next, width, height)
+                            && !curr.boxes.contains(next)
+                            && !paths.containsKey(next)) {
+                        paths.put(next, pathSoFar + (char) dir[2]);
+                        queue.add(next);
+                    }
+                }
+            }
+            // From each reachable player position, check if a nearby crate can be pushed.
+            for (Map.Entry<Point, String> entry : paths.entrySet()) {
+                Point playerPos = entry.getKey();
+                String pathToPlayerPos = entry.getValue();
+
+                for (int[] dir : directions) {
+                    Point boxPos = new Point(playerPos.x + dir[0], playerPos.y + dir[1]);
+
+                    if (!curr.boxes.contains(boxPos)) {
+                        continue;
+                    }
+
+                    Point pushPos = new Point(boxPos.x + dir[0], boxPos.y + dir[1]);
+
+                    if (!isValidFloor(pushPos, width, height) || curr.boxes.contains(pushPos)) {
+                        continue;
+                    }
+
+                    // Skip pushes that move crates into positions that are unlikely to reach a goal.
+                    if (!safeTiles.contains(pushPos)) {
+                        continue;
+                    }
+
+                    // Create a new crate layout after the push.
+                    Set<Point> newBoxes = new HashSet<>(curr.boxes);
+                    newBoxes.remove(boxPos);
+                    newBoxes.add(pushPos);
+
+                    // Avoid simple crate-wall patterns that usually make the puzzle unsolvable.
+                    if (has2x2DeadlockAround(pushPos, newBoxes)) {
+                        continue;
+                    }
+
+                    Point newPlayer = boxPos;
+                    Point newCanonical = getCanonical(newPlayer, newBoxes, width, height);
+                    StateKey newKey = new StateKey(newBoxes, newCanonical);
+
+                    // Skip this state if the same crate layout and player area were already checked.
+                    if (visited.contains(newKey)) {
+                        continue;
+                    }
+
+                    visited.add(newKey);
+
+                    int newG = curr.gCost + 1;
+                    int h = getHeuristic(newBoxes, width);
+
+                    if (h >= INF) {
+                        continue;
+                    }
+
+                    String newHistory = curr.moveHistory + pathToPlayerPos + (char) dir[2];
+                    BoardState nextState = new BoardState(newPlayer, newBoxes, newHistory, newG, newG + h);
+                    pq.add(nextState);
+                }
+            }
+        }
+
+        return "";
+    }
+
+    /**
+     * Finds the tiles where crates are still useful.
+     * This starts from the goal tiles and works backward to check which
+     * crate positions can still lead to a goal.
+     */
     private void computeSafeTiles(int width, int height) {
         Queue<Point> queue = new LinkedList<>();
         for (Point goal : goals) {
@@ -87,6 +197,10 @@ public class SokoBot {
         }
     }
 
+    /**
+     * Precomputes distances from each goal to the floor tiles.
+     * These distances are used by the heuristic during A* search.
+     */
     private void computeGoalDistances(int width, int height) {
         for (Point goal : goals) {
             Map<Point, Integer> distances = new HashMap<>();
@@ -113,18 +227,23 @@ public class SokoBot {
         }
     }
 
+    /**
+     * Estimates how close the current crate positions are to the goals.
+     * Each crate is matched to the nearest available goal. This is not
+     * always perfect, but it is fast and works well for simpler levels.
+     */
     private int getHeuristic(Set<Point> boxes, int width) {
         int totalDistance = 0;
         List<Point> availableGoals = new ArrayList<>(goals);
-        
-        // Sorting guarantees the greedy matching is 100% deterministic and stable
+
+        // Sort boxes so the heuristic gives consistent results each time.
         List<Point> sortedBoxes = new ArrayList<>(boxes);
         sortedBoxes.sort(Comparator.comparingInt(p -> p.y * width + p.x));
-        
+
         for (Point box : sortedBoxes) {
-            int minDistance = 100000;
+            int minDistance = INF;
             Point bestGoal = null;
-            
+
             for (Point goal : availableGoals) {
                 Map<Point, Integer> dists = goalDistances.get(goal);
                 if (dists != null && dists.containsKey(box)) {
@@ -135,20 +254,22 @@ public class SokoBot {
                     }
                 }
             }
-            
+
             if (bestGoal != null) {
-                availableGoals.remove(bestGoal); 
+                availableGoals.remove(bestGoal);
                 totalDistance += minDistance;
             } else {
-                return 100000; // Impossible Dead-End
+                return INF; // No reachable goal was found for this crate position.
             }
         }
-        return totalDistance * 10; // Highly aggressive weighting to prioritize pushing
+        return totalDistance * HEURISTIC_WEIGHT; // Highly aggressive weighting to prioritize pushing
     }
 
     /**
-     * Determines the top-leftmost reachable floor tile from the player's current spot.
-     * This forces the algorithm to treat walking around an empty room as a single, identical state.
+     * Gets one representative player position for the current reachable area.
+     * If the player can walk around without pushing crates, those positions
+     * are mostly the same for the search. Using one position helps reduce
+     * repeated states.
      */
     private Point getCanonical(Point player, Set<Point> boxes, int width, int height) {
         Queue<Point> q = new LinkedList<>();
@@ -173,127 +294,11 @@ public class SokoBot {
         return canonical;
     }
 
-    private void printDebugStats(String status) {
-        System.out.println("========== SokoBot Debug ==========");
-        System.out.println("Status: " + status);
-        System.out.println("Expanded states: " + expandedStates);
-        System.out.println("Generated pushes: " + generatedPushes);
-        System.out.println("Blocked by safe tiles: " + blockedBySafeTiles);
-        System.out.println("Skipped visited states: " + skippedVisited);
-        System.out.println("Invalid heuristic states: " + invalidHeuristic);
-        System.out.println("Max priority queue size: " + maxQueueSize);
-        System.out.println("Blocked by 2x2 deadlock: " + blockedBy2x2Deadlock);
-        System.out.println("===================================");
-    }
-
-    private String runMacroAStar(BoardState startState, int width, int height) {
-        PriorityQueue<BoardState> pq = new PriorityQueue<>();
-        Set<StateKey> visited = new HashSet<>();
-
-        Point startCanonical = getCanonical(startState.player, startState.boxes, width, height);
-        startState.fCost = getHeuristic(startState.boxes, width);
-        
-        visited.add(new StateKey(startState.boxes, startCanonical));
-        pq.add(startState);
-
-        while (!pq.isEmpty()) {
-            maxQueueSize = Math.max(maxQueueSize, pq.size());
-
-            BoardState curr = pq.poll();
-            expandedStates++;
-
-            if (expandedStates % 10000 == 0) {
-                System.out.println("[SokoBot] Expanded: " + expandedStates
-                        + " | Generated pushes: " + generatedPushes
-                        + " | Queue: " + pq.size()
-                        + " | Safe blocked: " + blockedBySafeTiles
-                        + " | 2x2 blocked: " + blockedBy2x2Deadlock
-                        + " | Visited skipped: " + skippedVisited
-                        + " | Invalid h: " + invalidHeuristic);
-            }
-
-            if (goals.containsAll(curr.boxes)) {
-                printDebugStats("Solved");
-                return curr.moveHistory;
-            }
-
-            // 1. MACRO SCAN: Find all floor tiles the player can currently walk to
-            Queue<Point> q = new LinkedList<>();
-            Map<Point, String> paths = new HashMap<>();
-
-            q.add(curr.player);
-            paths.put(curr.player, "");
-
-            while (!q.isEmpty()) {
-                Point p = q.poll();
-                String pathSoFar = paths.get(p);
-
-                for (int[] dir : directions) {
-                    Point next = new Point(p.x + dir[0], p.y + dir[1]);
-                    if (isValidFloor(next, width, height) && !curr.boxes.contains(next) && !paths.containsKey(next)) {
-                        paths.put(next, pathSoFar + (char)dir[2]);
-                        q.add(next);
-                    }
-                }
-            }
-
-            // 2. MACRO PUSH: Only generate new realities if a box is being pushed!
-            for (Map.Entry<Point, String> entry : paths.entrySet()) {
-                Point p = entry.getKey();
-                String pathToP = entry.getValue();
-
-                for (int[] dir : directions) {
-                    Point boxPos = new Point(p.x + dir[0], p.y + dir[1]);
-                    
-                    if (curr.boxes.contains(boxPos)) {
-                        Point pushPos = new Point(boxPos.x + dir[0], boxPos.y + dir[1]);
-
-                        if (isValidFloor(pushPos, width, height) && !curr.boxes.contains(pushPos)) {
-                            generatedPushes++;
-
-                            if (safeTiles.contains(pushPos)) {
-
-                                Set<Point> newBoxes = new HashSet<>(curr.boxes);
-                                newBoxes.remove(boxPos);
-                                newBoxes.add(pushPos);
-
-                                if (has2x2DeadlockAround(pushPos, newBoxes)) {
-                                    blockedBy2x2Deadlock++;
-                                    continue;
-                                }
-
-                                Point newPlayer = boxPos;
-                                Point newCanonical = getCanonical(newPlayer, newBoxes, width, height);
-                                StateKey newKey = new StateKey(newBoxes, newCanonical);
-
-                                if (!visited.contains(newKey)) {
-                                    visited.add(newKey);
-                                    
-                                    int newG = curr.gCost + 1; // 1 Box Push = 1 Cost
-                                    int h = getHeuristic(newBoxes, width);
-                                    
-                                    if (h < 100000) { 
-                                        String newHistory = curr.moveHistory + pathToP + (char)dir[2];
-                                        BoardState nextState = new BoardState(newPlayer, newBoxes, newHistory, newG, newG + h);
-                                        pq.add(nextState);
-                                    } else {
-                                        invalidHeuristic++;
-                                    }
-                                } else {
-                                    skippedVisited++;
-                                }
-                            } else {
-                                blockedBySafeTiles++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        printDebugStats("No solution found before search space ended");
-        return "";
-    }
-
+    /**
+     * Checks for a simple 2x2 deadlock near the crate that was just moved.
+     * If a 2x2 area is filled with walls/crates and one of the crates is not
+     * on a goal, the puzzle usually cannot be solved from that state anymore.
+     */
     private boolean has2x2DeadlockAround(Point movedBox, Set<Point> boxes) {
         int[][] topLeftOffsets = {
                 {0, 0},
@@ -327,22 +332,25 @@ public class SokoBot {
         return false;
     }
 
+    // A tile counts as blocked if it is a wall or already has a crate.
     private boolean isBlockedFor2x2(Point p, Set<Point> boxes) {
         return walls.contains(p) || boxes.contains(p);
     }
 
+    // Used by the 2x2 deadlock check to see if a crate is stuck off-goal.
     private boolean isNonGoalBox(Point p, Set<Point> boxes) {
         return boxes.contains(p) && !goals.contains(p);
     }
 
+    /**
+     * Checks if a tile is inside the board and not a wall.
+     */
     private boolean isValidFloor(Point p, int width, int height) {
         return p.x >= 0 && p.x < width && p.y >= 0 && p.y < height && !walls.contains(p);
     }
 }
 
-// ==========================================
-// DATA STRUCTURES
-// ==========================================
+// Stores a board coordinate using x as column and y as row.
 class Point {
     int x, y;
     Point(int x, int y) { this.x = x; this.y = y; }
@@ -353,12 +361,13 @@ class Point {
     @Override public int hashCode() { return (x * 31) + y; }
 }
 
+// Used for visited checking. It stores the crate layout and the player's reachable area.
 class StateKey {
     Set<Point> boxes;
     Point canonicalPlayer;
 
     StateKey(Set<Point> boxes, Point canonicalPlayer) {
-        this.boxes = boxes;
+        this.boxes = new HashSet<>(boxes);
         this.canonicalPlayer = canonicalPlayer;
     }
 
@@ -371,12 +380,13 @@ class StateKey {
     @Override public int hashCode() { return canonicalPlayer.hashCode() * 31 + boxes.hashCode(); }
 }
 
+// Represents one possible puzzle state used by the A* search.
 class BoardState implements Comparable<BoardState> {
     Point player;
     Set<Point> boxes;
     String moveHistory;
-    int gCost; 
-    int fCost; 
+    int gCost;
+    int fCost;
 
     BoardState(Point player, Set<Point> boxes, String moveHistory, int gCost, int fCost) {
         this.player = player;
